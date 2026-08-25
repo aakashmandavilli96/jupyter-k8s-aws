@@ -23,6 +23,11 @@ on:
         required: false
         type: string
         default: ""
+      oauth-app-num:
+        description: "OAuth app number (1–3). Fresh deploys consume a LE cert (limit: 5/subdomain/week). Default 3 (fresh); use 2 (canary) if slot 3 is exhausted."
+        required: false
+        type: string
+        default: "3"
   workflow_dispatch:
     inputs:
       test-filter:
@@ -45,6 +50,11 @@ on:
         required: false
         type: string
         default: ""
+      oauth-app-num:
+        description: "OAuth app number (1–3). Fresh deploys consume a LE cert (limit: 5/subdomain/week). Default 3 (fresh); use 2 (canary) if slot 3 is exhausted."
+        required: false
+        type: string
+        default: "3"
 
 permissions:
   id-token: write
@@ -62,6 +72,7 @@ jobs:
     uses: ./.github/workflows/e2e-build-image.yml
     with:
       ref: ${{ inputs.ref }}
+      oauth-app-num: ${{ inputs.oauth-app-num }}
     permissions:
       id-token: write
       contents: read
@@ -70,7 +81,11 @@ jobs:
 
   cleanup-existing:
     name: "Cleanup existing deployment"
-    if: ${{ !inputs.skip-deployment }}
+    # TEMPORARY: hardcoded off. find-takedown-eks has been failing on stale/dirty
+    # projects and blocking the v0.2.0 release. The target subdomain is currently
+    # clean (no existing cluster), so cleanup is a no-op we can skip. REVERT to
+    # `${{ !inputs.skip-deployment }}` once v0.2.0 is out.
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 90
     environment: e2e-fresh
@@ -115,13 +130,15 @@ jobs:
         run: JD_DIR=jupyter-deploy just ci-restore sandbox-ci
 
       - name: Find and take down previous deployment
-        run: JD_DIR=jupyter-deploy just find-takedown-eks 3 sandbox-ci sandbox-e2e
+        run: JD_DIR=jupyter-deploy just find-takedown-eks ${{ inputs.oauth-app-num }} sandbox-ci sandbox-e2e
 
   # --- Deploy ---
 
   deploy:
     name: "Deploy from scratch"
-    needs: [build-image, cleanup-existing]
+    # cleanup-existing is temporarily hardcoded off (see its comment); dropped from
+    # needs so deploy still runs. REVERT to [build-image, cleanup-existing] with it.
+    needs: [build-image]
     if: ${{ !inputs.skip-deployment }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -170,14 +187,14 @@ jobs:
 
       - name: Generate .env
         run: >-
-          JD_DIR=jupyter-deploy just env-setup-eks "" sandbox-ci 3
+          JD_DIR=jupyter-deploy just env-setup-eks "" sandbox-ci ${{ inputs.oauth-app-num }}
           "org=jupyter-infra,team=jupyter-k8s-aws-e2e-app-access,rbac-team=jupyter-k8s-aws-e2e-app-access,admin-roles=[\"Admin\",\"DeployRole\",\"jupyter-k8s-aws-ci-e2e-52ed8fab\"]"
 
       - name: Import auth state
         run: JD_DIR=jupyter-deploy just auth-import sandbox-ci
 
       - name: Pull pre-built E2E image
-        run: JD_DIR=jupyter-deploy just ci-e2e-pull 3 ${{ needs.build-image.outputs.ecr-tag }} sandbox-ci
+        run: JD_DIR=jupyter-deploy just ci-e2e-pull ${{ inputs.oauth-app-num }} ${{ needs.build-image.outputs.ecr-tag }} sandbox-ci
 
       - name: Deploy (jd init / config / up)
         id: deploy
@@ -190,7 +207,7 @@ jobs:
           aws eks update-kubeconfig --name "$CLUSTER" --region ${{ vars.AWS_REGION }}
           helm upgrade jupyter-k8s-aws-oidc charts/aws-oidc \
             -n jupyter-k8s-router \
-            --reuse-values \
+            --reset-then-reuse-values \
             --wait --timeout 5m
 
       - name: Refresh auth state (full GitHub login)
@@ -218,13 +235,14 @@ jobs:
       - name: Upload test results to S3
         if: failure()
         continue-on-error: true
-        run: JD_DIR=jupyter-deploy just ci-upload-test-results 3 sandbox-ci
+        run: JD_DIR=jupyter-deploy just ci-upload-test-results ${{ inputs.oauth-app-num }} sandbox-ci
 
   # --- Gate ---
 
   deploy-gate:
     name: "Deploy gate"
-    needs: [build-image, cleanup-existing, deploy]
+    # cleanup-existing temporarily removed from needs (hardcoded off). REVERT with it.
+    needs: [build-image, deploy]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 1
@@ -250,7 +268,7 @@ jobs:
       test-filter: ${{ inputs.test-filter }}
       ref: ${{ inputs.ref }}
       ecr-tag: ${{ needs.build-image.outputs.ecr-tag }}
-      oauth-app-num: 3
+      oauth-app-num: ${{ inputs.oauth-app-num }}
       timeout-minutes: 120
     permissions:
       id-token: write
@@ -264,7 +282,7 @@ jobs:
       test-filter: ${{ inputs.test-filter }}
       ref: ${{ inputs.ref }}
       ecr-tag: ${{ needs.build-image.outputs.ecr-tag }}
-      oauth-app-num: 3
+      oauth-app-num: ${{ inputs.oauth-app-num }}
       marker: mutating
       mutate: true
       timeout-minutes: 60
@@ -325,7 +343,7 @@ jobs:
 
       - name: Restore EKS project
         id: restore-eks
-        run: JD_DIR=jupyter-deploy just ci-restore-eks 3 sandbox-ci sandbox-e2e
+        run: JD_DIR=jupyter-deploy just ci-restore-eks ${{ inputs.oauth-app-num }} sandbox-ci sandbox-e2e
         continue-on-error: true
 
       - name: Destroy cluster

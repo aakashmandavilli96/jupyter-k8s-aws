@@ -1,5 +1,6 @@
 # OAuth app slot numbers
-# 1 = pr, 2 = canary, 3 = fresh
+# 1 = pr, 2 = canary, 3 = fresh (only these three are real; 4-6 are unprovisioned placeholders)
+# Local-dev default only — CI passes the slot explicitly (release workflow's oauth_app_num input).
 ci_dir := "sandbox-ci"
 e2e_dir := "sandbox-e2e"
 fresh_app_num := "3"

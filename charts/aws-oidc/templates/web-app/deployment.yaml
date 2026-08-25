@@ -8,7 +8,9 @@ metadata:
     app: web-app
     component: web-app
 spec:
+  {{- if not (and .Values.webApp.keda.enabled (.Capabilities.APIVersions.Has "keda.sh/v1alpha1")) }}
   replicas: {{ .Values.webApp.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: web-app
@@ -27,6 +29,24 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.webApp.affinity }}
+      affinity:
+        {{- toYaml .Values.webApp.affinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: web-app
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- with .Values.webApp.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: web-app
         image: {{ .Values.webApp.repository }}/{{ .Values.webApp.imageName }}:{{ .Values.webApp.imageTag }}
@@ -40,7 +60,7 @@ spec:
         - name: PORT
           value: "8090"
         - name: NAMESPACE
-          value: {{ .Values.webApp.namespace | quote }}
+          value: {{ .Values.webApp.workspacesDefaultNamespace | quote }}
         - name: STATIC_DIR
           value: "./dist"
         - name: SESSION_COOKIE_NAME
@@ -63,6 +83,24 @@ spec:
           value: {{ .Values.webApp.session.newKeyUseDelaySecs | quote }}
         - name: SESSION_EXPECTED_DOMAIN
           value: {{ .Values.domain | quote }}
+        {{- with .Values.webApp.workspaceNamespaceSelection.additionalNamespaces }}
+        # Additional workspace namespaces; the server always unions in NAMESPACE
+        # (workspacesDefaultNamespace), so it's not repeated here.
+        - name: WORKSPACE_NAMESPACES
+          value: {{ join "," . | quote }}
+        {{- end }}
+        - name: WORKSPACE_NAMESPACE_LABEL_SELECTOR
+          value: {{ .Values.webApp.workspaceNamespaceSelection.labelSelector | quote }}
+        - name: NAMESPACE_CANDIDATE_CAP
+          value: {{ .Values.webApp.workspaceNamespaceSelection.candidateCap | quote }}
+        - name: NAMESPACE_VISIBLE_PERSIST_CAP
+          value: {{ .Values.webApp.workspaceNamespaceSelection.visiblePersistCap | quote }}
+        - name: NAMESPACE_POLL_INTERVAL_SECS
+          value: {{ .Values.webApp.workspaceNamespaceSelection.pollIntervalSecs | quote }}
+        - name: SHARED_TEMPLATE_NAMESPACE
+          value: {{ .Values.webApp.sharedNamespace | quote }}
+        - name: LOG_LEVEL
+          value: {{ .Values.webApp.logLevel | quote }}
         {{- if .Values.webApp.clusterAccess.clusterName }}
         # Kubectl access page: clusterName gates the feature — empty means disabled
         - name: CLUSTER_NAME

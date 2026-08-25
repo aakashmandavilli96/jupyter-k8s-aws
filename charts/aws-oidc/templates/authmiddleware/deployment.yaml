@@ -8,7 +8,9 @@ metadata:
     app: authmiddleware
     component: auth
 spec:
+  {{- if not (and .Values.authmiddleware.keda.enabled (.Capabilities.APIVersions.Has "keda.sh/v1alpha1")) }}
   replicas: {{ .Values.authmiddleware.replicas }}
+  {{- end }}
   selector:
     matchLabels:
       app: authmiddleware
@@ -33,6 +35,24 @@ spec:
       {{- end }}
       {{- with .Values.authmiddleware.tolerations | default .Values.tolerations }}
       tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.authmiddleware.affinity }}
+      affinity:
+        {{- toYaml .Values.authmiddleware.affinity | nindent 8 }}
+      {{- else }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: authmiddleware
+                topologyKey: kubernetes.io/hostname
+      {{- end }}
+      {{- with .Values.authmiddleware.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
