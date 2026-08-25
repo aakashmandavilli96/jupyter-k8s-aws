@@ -1,14 +1,17 @@
 # [AWS OIDC]: Configuration for aws-oidc deployment mode
 
-# Node selector labels applied to all chart component pods (default: no constraint)
+# Node selector labels applied to all chart component pods (default: no constraint).
+# Set per deployment to pin pods to specific nodes; overridable per-component below.
 nodeSelector: {}
-# Tolerations applied to all chart component pods (default: none)
+
+# Tolerations applied to all chart component pods (default: none).
+# Set per deployment when target nodes carry taints; overridable per-component below.
 tolerations: []
 
 # Init container image used for readiness checks
 initImage:
   repository: docker.io/busybox
-  tag: "1.37"
+  tag: "1.38"
 
 # Default namespace for Traefik Middlewares and other resources
 # This should be left as the default for normal operation
@@ -64,9 +67,23 @@ traefik:
   # Traefik deployment image name
   imageName: traefik
   # Traefik deployment image tag
-  imageTag: v3.7.5
-  # Number of traefik replicas
-  replicas: 1
+  imageTag: v3.7.9
+  # Number of traefik replicas (used when keda.enabled is false)
+  replicas: 2
+  # KEDA ScaledObject configuration — scales Traefik based on open connections.
+  # Opt-in: enable only on clusters that have the KEDA operator + CRDs and a
+  # Prometheus reachable at prometheusAddress below.
+  keda:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    # How long to wait before scale-to-zero (inert when minReplicas >= 1).
+    cooldownPeriodSeconds: 300
+    # How often KEDA queries Prometheus for the metric.
+    pollingIntervalSeconds: 30
+    # Scale up when average open connections per replica exceeds this threshold.
+    targetOpenConnections: "100"
+    prometheusAddress: "http://prometheus-server.monitoring.svc.cluster.local:80"
   # Redirect HTTP to HTTPS
   redirectHttp: true
   # Whether to configure traefik at 'debug' log level ('info' if omitted)
@@ -77,10 +94,27 @@ traefik:
   nodeSelector: {}
   # Tolerations for traefik pods (overrides chart-level tolerations)
   tolerations: []
+  # Pod affinity rules — replaces the built-in preferred hostname anti-affinity
+  # when set. Leave empty ({}) to use the chart default.
+  affinity: {}
+  # Pod topology spread constraints — empty by default.
+  topologySpreadConstraints: []
+  # JSON access logs to stdout (per-request status/middleware/timing), consumed
+  # by Fluent Bit → CloudWatch in jupyter-deploy. Default off → rendered args
+  # unchanged. Emits --accesslog=true --accesslog.format=json with the
+  # Authorization header redacted and query strings dropped (the /oauth2/callback
+  # and /dex routes carry OAuth code/state params that must not reach CloudWatch).
+  # For anything more (format, filters, keeping query params), use extraArgs below.
+  accessLog:
+    enabled: false
+  # Arbitrary extra Traefik CLI args, appended after the chart's args (so a flag
+  # here overrides an earlier one, e.g. accessLog.* above). Example:
+  #   extraArgs: ["--accesslog.filters.statuscodes=400-599"]
+  extraArgs: []
 
 # Dex configuration
 dex:
-  # Number of dex replicas
+  # Number of dex replicas (static — auth only, negligible load)
   replicas: 1
   # Dex image settings
   repository: ghcr.io/dexidp/dex
@@ -93,6 +127,15 @@ dex:
   certCheck:
     # Maximum time to wait for TLS certificate to be ready
     timeout_seconds: 300
+  # startupProbe config gating readiness on the first signing key.
+  # The probe polls /dex/keys until a "kid" appears; until then the pod stays
+  # NotReady so the EKS OIDC authenticator never caches an empty JWKS.
+  keyCheck:
+    # How often the startupProbe checks /dex/keys for a signing key
+    period_seconds: 3
+    # Maximum time to wait for the first signing key (budget = failureThreshold *
+    # period_seconds). Defaults align with the certCheck budget.
+    timeout_seconds: 180
 
   # Node selector for dex pods (overrides chart-level nodeSelector)
   nodeSelector: {}
@@ -163,6 +206,12 @@ githubRbac:
   namespace: default
   # whether to create organization/team-based role and role bindings
   createOrgsRole: true
+  # Whether to create the read-only shared-discovery Role/RoleBinding in
+  # webApp.sharedNamespace (lets end users list shared templates + access
+  # strategies for the editor dropdowns). Off by default: the chart does not
+  # create webApp.sharedNamespace, so enabling this requires that namespace to
+  # already exist.
+  createSharedDiscoveryRole: false
   # Falls back to github.orgs when unset (empty [] is treated as unset by Helm).
   # To disable RBAC subjects, set githubRbac.create: false — not an empty list.
   orgs: []
@@ -220,15 +269,40 @@ webApp:
   nodeSelector: {}
   # Tolerations for web-app pods (overrides chart-level tolerations)
   tolerations: []
+  # Pod affinity rules — replaces the built-in preferred hostname anti-affinity
+  # when set. Leave empty ({}) to use the chart default.
+  affinity: {}
+  # Pod topology spread constraints — empty by default.
+  topologySpreadConstraints: []
   # Enable or disable the web UI (default: true)
   enabled: true
+  # replicas is used only when keda.enabled is false
   replicas: 2
+  # KEDA ScaledObject configuration — scales web-app based on Traefik open
+  # connections. web-app has no /metrics endpoint, so Traefik's connection count
+  # is used as a proxy for active user sessions.
+  # Opt-in: see traefik.keda notes on cluster prerequisites.
+  keda:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 20
+    # How long to wait before scale-to-zero (inert when minReplicas >= 1).
+    cooldownPeriodSeconds: 300
+    # How often KEDA queries Prometheus for the metric.
+    pollingIntervalSeconds: 30
+    # Scale up when average open connections per replica exceeds this threshold.
+    # Higher than traefik/authmiddleware — web-app is stateless and lightweight,
+    # handling more concurrent sessions per pod.
+    targetOpenConnections: "200"
+    prometheusAddress: "http://prometheus-server.monitoring.svc.cluster.local:80"
   imagePullPolicy: Always
   repository: ghcr.io/jupyter-infra
   imageName: jupyter-k8s-ui
-  imageTag: v0.1.2
-  # Kubernetes namespace where workspaces are created and managed
-  namespace: default
+  imageTag: v0.1.5
+  # Default Kubernetes namespace where workspaces are created and managed. This
+  # is always part of the workspace-switcher's namespace universe; add more via
+  # workspaceNamespaceSelection.additionalNamespaces.
+  workspacesDefaultNamespace: default
   resources:
     limits:
       cpu: 500m
@@ -237,13 +311,23 @@ webApp:
       cpu: 100m
       memory: 128Mi
   # Session cookie configuration for auth fast path
-  # Timing values (cookieMaxAge, maxLifetime, nearExpiryThreshold) are
-  # automatically derived from oauth2Proxy.cookieExpire
+  # maxLifetime (absolute cap) and nearExpiryThreshold stay derived from
+  # oauth2Proxy.cookieExpire; cookieMaxAge is set explicitly below.
   session:
     cookieName: "workspace_console_session"
     cookiePath: "/api/"
     secretName: "web-app-session-secret"
-    numberOfKeys: 3
+    # Idle timeout for the fast-path cookie. SLIDING: the cookie is re-signed with
+    # the newest key and its Max-Age re-Set on every authenticated request, so only
+    # inactivity counts. Keep short and below the signing-key retention (see
+    # numberOfKeys) so the browser stops sending the cookie before its key rotates
+    # out. An idle-beyond-timeout return then falls to the OAuth2 Proxy auth-path
+    # and re-auths transparently. Must be < the session max lifetime.
+    cookieMaxAge: "1h"
+    # Session-signing keys retained by web-app-session-rotator. Retention
+    # (numberOfKeys * rotationInterval) MUST be >= cookieMaxAge + rotationInterval
+    # since cookies always carry the newest key.
+    numberOfKeys: 6
     newKeyUseDelaySecs: 5
   # Kubectl access page — lets users download a kubeconfig setup script.
   # clusterName gates the feature: set it to enable, leave empty to disable.
@@ -260,6 +344,35 @@ webApp:
     caCertBase64: ""
     # Localhost port for kubelogin OIDC callback
     oidcCallbackPort: 9800
+  # Namespace where shared workspace templates live (read with the user's OIDC
+  # token, not the SA). Default mirrors jupyter-k8s-ui server/k8s/config.ts.
+  sharedNamespace: "jupyter-k8s-shared"
+  # Log verbosity: debug | info | warn | error. Mirrors jupyter-k8s-ui prod default.
+  logLevel: "info"
+  # Namespace-selector configuration for the multi-namespace workspace switcher.
+  # Requires jupyter-k8s-ui >= v0.1.5 (namespace selector landed after v0.1.4):
+  # on older images these knobs are a no-op and the namespace-discovery
+  # ClusterRole stays dormant. Defaults kept in sync with jupyter-k8s-ui
+  # server/k8s/config.ts — mirror any UI-default change here.
+  workspaceNamespaceSelection:
+    # Extra workspace namespaces to expose in the switcher, IN ADDITION to
+    # webApp.workspacesDefaultNamespace (which is always included). Use this to
+    # offer a fixed multi-namespace set without relying on label-based cluster
+    # discovery, e.g. additionalNamespaces: ["team-a", "team-b"].
+    # Must NOT contain the default namespace (it's added automatically).
+    # Empty = single-namespace mode (just the default).
+    additionalNamespaces: []
+    # Label selector for auto-discovering workspace-enabled namespaces. Full
+    # selector syntax, e.g. "workspace.jupyter.org/workspaces-enabled=true" or
+    # "env in (prod,staging)". (The UI server also accepts a bare key via a
+    # separate env var; the chart exposes the selector as the superset.)
+    labelSelector: "workspace.jupyter.org/workspaces-enabled=true"
+    # SSAR fan-out page size (candidates access-checked per /namespaces page).
+    candidateCap: 20
+    # Max visible namespaces persisted in the preference cookie.
+    visiblePersistCap: 100
+    # Namespace universe re-list poll interval (seconds).
+    pollIntervalSecs: 60
 
 # Authmiddleware configuration
 authmiddleware:
@@ -267,15 +380,40 @@ authmiddleware:
   nodeSelector: {}
   # Tolerations for authmiddleware pods (overrides chart-level tolerations)
   tolerations: []
+  # Pod affinity rules — replaces the built-in preferred hostname anti-affinity
+  # when set. Leave empty ({}) to use the chart default.
+  affinity: {}
+  # Pod topology spread constraints — empty by default.
+  topologySpreadConstraints: []
   # Whether to deploy the authmiddleware component
   enabled: true
-  # Number of replicas
-  replicas: 1
+  # Number of replicas (used when keda.enabled is false)
+  replicas: 2
+  # KEDA ScaledObject configuration — scales authmiddleware based on Traefik open
+  # connections. authmiddleware is a ForwardAuth called on every workspace request
+  # with no session cookie bypass, so it scales with active workspace sessions.
+  # Opt-in: see traefik.keda notes on cluster prerequisites.
+  keda:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 5
+    # How long to wait before scale-to-zero (inert when minReplicas >= 1).
+    cooldownPeriodSeconds: 300
+    # How often KEDA queries Prometheus for the metric.
+    pollingIntervalSeconds: 30
+    # Scale up when average open connections per replica exceeds this threshold.
+    # >= traefik's threshold: every connection authmiddleware sees is already an
+    # open connection on traefik, but per connection authmiddleware does far less
+    # work (lightweight cookie checks + simple K8s API calls) than traefik (which
+    # holds WebSocket tunnels and streams payloads), so it tolerates more
+    # connections per pod. Values are pre-load-test estimates.
+    targetOpenConnections: "150"
+    prometheusAddress: "http://prometheus-server.monitoring.svc.cluster.local:80"
   # Authmiddleware image settings
   imagePullPolicy: Always
   repository: ghcr.io/jupyter-infra
   imageName: jupyter-k8s-authmiddleware
-  imageTag: v0.1.2
+  imageTag: v0.2.1
   # Resource limits and requests
   resources:
     limits:
@@ -327,7 +465,7 @@ rotator:
   imagePullPolicy: Always
   repository: ghcr.io/jupyter-infra
   imageName: jupyter-k8s-rotator
-  imageTag: v0.1.2
+  imageTag: v0.2.1
   # Rotation interval (how often to rotate keys)
   # Must be parseable as a duration (e.g., "15m", "1h")
   rotationInterval: "15m"

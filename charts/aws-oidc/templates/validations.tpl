@@ -38,6 +38,23 @@
 {{- fail "accessStrategy.createBearer requires authmiddleware.enableBearerAuth to be true" }}
 {{- end }}
 
+{{/* Validate: additionalNamespaces must not include the default workspace namespace (it is added automatically) */}}
+{{- if has .Values.webApp.workspacesDefaultNamespace .Values.webApp.workspaceNamespaceSelection.additionalNamespaces }}
+{{- fail (printf "webApp.workspaceNamespaceSelection.additionalNamespaces must not contain the default workspace namespace %q — it is always included automatically" .Values.webApp.workspacesDefaultNamespace) }}
+{{- end }}
+
+{{/* Validate: additionalNamespaces must not contain duplicates (| default list tolerates a null override) */}}
+{{- $additional := .Values.webApp.workspaceNamespaceSelection.additionalNamespaces | default list }}
+{{- if ne (len $additional) (len (uniq $additional)) }}
+{{- fail (printf "webApp.workspaceNamespaceSelection.additionalNamespaces must not contain duplicates, got: %v" $additional) }}
+{{- end }}
+
+{{/* Validate: the pre-rename webApp.namespace key is no longer read (renamed to workspacesDefaultNamespace).
+     Guard explicitly — with --reset-then-reuse-values a stored old value would otherwise be silently dropped. */}}
+{{- if .Values.webApp.namespace }}
+{{- fail "webApp.namespace was renamed to webApp.workspacesDefaultNamespace — move the value to the new key" }}
+{{- end }}
+
 {{/* Validate JWT refresh settings */}}
 {{- $jwtRefreshWindowSeconds := 0 }}
 {{- if hasSuffix "h" .Values.authmiddleware.jwtRefreshWindow }}
@@ -74,6 +91,41 @@
 {{/* Validate: jwtRefreshHorizon >= jwtExpiration */}}
 {{- if lt $jwtRefreshHorizonSeconds $jwtExpirationSecondsForRefresh }}
 {{- fail (printf "authmiddleware.jwtRefreshHorizon (%s) must be greater than or equal to jwtExpiration (%s)" .Values.authmiddleware.jwtRefreshHorizon .Values.authmiddleware.jwtExpiration) }}
+{{- end }}
+
+{{/* Validate: dex startupProbe keyCheck budget yields a valid failureThreshold (see #82).
+     deployment.yaml computes failureThreshold = timeout_seconds / period_seconds (integer
+     div). A period of 0 divides by zero, and period > timeout truncates to 0 — either way
+     Kubernetes rejects a startupProbe with failureThreshold: 0, so guard both here. */}}
+{{- if lt (.Values.dex.keyCheck.period_seconds | int) 1 }}
+{{- fail (printf "dex.keyCheck.period_seconds must be at least 1, got %d" (.Values.dex.keyCheck.period_seconds | int)) }}
+{{- end }}
+{{- if lt (.Values.dex.keyCheck.timeout_seconds | int) (.Values.dex.keyCheck.period_seconds | int) }}
+{{- fail (printf "dex.keyCheck.timeout_seconds (%d) must be >= period_seconds (%d) so the startupProbe failureThreshold is at least 1" (.Values.dex.keyCheck.timeout_seconds | int) (.Values.dex.keyCheck.period_seconds | int)) }}
+{{- end }}
+
+{{/* Validate: web-app session-signing key retention must cover the cookie's idle Max-Age (#86).
+     The fast-path cookie (workspace_console_session) is re-signed with the NEWEST key on every
+     request and sent by the browser until its (sliding) Max-Age. If its key is pruned first, the
+     web-app can't decode it and — because the fast-path IngressRoute bypasses OAuth2 Proxy — the
+     request dead-ends tokenless. Mirroring the authmiddleware retention guard, retention must
+     exceed cookieMaxAge by at least one rotationInterval (cookies always carry the newest key).
+     Retention = webApp.session.numberOfKeys * rotator.rotationInterval. */}}
+{{- if and .Values.webApp.enabled .Values.rotator.enabled }}
+{{- $cookieMaxAgeSecs := include "defaulter.sessionCookieMaxAgeSecs" . | int }}
+{{- $maxLifetimeSecs := include "defaulter.sessionMaxLifetimeSecs" . | int }}
+{{- if lt $cookieMaxAgeSecs 1 }}
+{{- fail (printf "webApp.session.cookieMaxAge must be a positive duration (e.g. \"1h\"), got %q" .Values.webApp.session.cookieMaxAge) }}
+{{- end }}
+{{- if ge $cookieMaxAgeSecs $maxLifetimeSecs }}
+{{- fail (printf "webApp.session.cookieMaxAge (%s) must be less than the session max lifetime (%ds, = oauth2Proxy.cookieExpire %s)" .Values.webApp.session.cookieMaxAge $maxLifetimeSecs .Values.oauth2Proxy.cookieExpire) }}
+{{- end }}
+{{- $rotationSecs := include "defaulter.durationToSeconds" .Values.rotator.rotationInterval | int }}
+{{- $retentionSecs := mul (.Values.webApp.session.numberOfKeys | int) $rotationSecs }}
+{{- $requiredSecs := add $cookieMaxAgeSecs $rotationSecs }}
+{{- if lt $retentionSecs $requiredSecs }}
+{{- fail (printf "web-app session key retention (%ds = numberOfKeys %d * rotationInterval %s) must be >= cookieMaxAge (%s) + one rotationInterval (%ds). Increase webApp.session.numberOfKeys or rotator.rotationInterval, or lower webApp.session.cookieMaxAge." $retentionSecs (.Values.webApp.session.numberOfKeys | int) .Values.rotator.rotationInterval .Values.webApp.session.cookieMaxAge $requiredSecs) }}
+{{- end }}
 {{- end }}
 
 {{/* Validate rotator configuration if enabled */}}
